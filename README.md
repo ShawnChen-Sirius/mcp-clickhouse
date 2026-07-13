@@ -68,6 +68,39 @@ query surface is bounded by default:
   (`file`/`url`/`s3`/`remote`/`postgresql`/`executable`/`python`/…) in raw `run_chdb_select_query`
   SQL. The list of disallowed functions is taken from the live engine's `system.table_functions`.
 
+#### chDB sources: query external data as named tables
+
+`CHDB_SOURCES` declares external data sources once, in server config, and exposes each one as an
+ordinary named view or database. Agents query and join them with plain SQL — no connection
+strings, credentials, or table-function syntax in their queries — and discover them through the
+regular `list_databases` / `list_tables` / `describe_table` tools:
+
+```json
+[
+  {"name": "lake",      "type": "s3",  "url": "s3://mybucket/events/*.parquet",
+   "access_key_id": "…", "secret_access_key": "…", "format": "Parquet"},
+  {"name": "events",    "type": "file", "path": "/data/events.csv"},
+  {"name": "appdb",     "type": "postgres", "host": "rds.internal", "database": "app",
+   "user": "readonly", "password": "…"},
+  {"name": "warehouse", "type": "clickhouse", "host": "abc.clickhouse.cloud",
+   "database": "analytics", "table": "products", "user": "default", "password": "…"}
+]
+```
+
+```sql
+SELECT u.tier, sum(e.amount) FROM lake AS e JOIN appdb.users AS u ON u.uid = e.uid GROUP BY u.tier
+```
+
+Sources are materialized at server init, while the session is still writable, and the session is
+locked to `readonly=2` afterwards. Credentials never leave the server: the engine masks them as
+`[HIDDEN]` in `SHOW CREATE` and the `system` tables. Supported types: `file`, `url` (alias
+`http`), `s3` (supports `"nosign": true` for public buckets), `postgres` (alias `postgresql`) and
+`mysql` as whole-database proxies, and `clickhouse` (a remote table via `remoteSecure`, or
+`remote` with `"secure": false`). `s3`/`url` sources are created lazily when a `structure`
+(e.g. `"id Int64, name String"`) is given; without one the engine infers the schema at init, which
+requires the source to be reachable. A source that fails to materialize is logged and skipped;
+the rest still come up.
+
 ### Health Check Endpoint
 
 When running with HTTP or SSE transport, a health check endpoint is available at `/health`. This endpoint:
@@ -617,6 +650,9 @@ The following environment variables are used to configure the ClickHouse and chD
 * `CHDB_FILE_ALLOWLIST`: Colon-separated path prefixes that sandbox the chDB engine
   * Default: unset (no gating — behavior unchanged)
   * When set, `run_chdb_select_query` refuses external/file table functions (`file`/`url`/`s3`/`remote`/…) in raw SQL
+* `CHDB_SOURCES`: JSON array of external sources to expose as named views/databases
+  * Default: unset
+  * See [chDB sources](#chdb-sources-query-external-data-as-named-tables); `file`-type sources also respect `CHDB_FILE_ALLOWLIST`
 
 #### Example Configurations
 

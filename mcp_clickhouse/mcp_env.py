@@ -227,6 +227,11 @@ class ChDBConfig:
         CHDB_FILE_ALLOWLIST: Colon-separated path prefixes. When set, the chDB
             query tool is sandboxed: raw SQL may not call external/file table
             functions (file/url/s3/remote/...) (default: unset)
+        CHDB_SOURCES: JSON array declaring external sources (file/url/s3/
+            postgres/mysql/clickhouse) that are materialized as named views or
+            databases at init, before the session is locked read-only.
+            Credentials stay server-side; the engine masks them as [HIDDEN] in
+            SHOW CREATE and the system tables (default: unset)
     """
 
     # Engine result-size cap (1 MiB) when CHDB_MAX_RESULT_BYTES is unset/invalid.
@@ -292,6 +297,21 @@ class ChDBConfig:
         if not raw:
             return ()
         return tuple(p for p in (part.strip() for part in raw.split(":")) if p)
+
+    @property
+    def sources(self) -> list:
+        """Validated CHDB_SOURCES entries (list of chdb_sources.SourceSpec).
+
+        Empty when unset. Raises ValueError on malformed JSON or an invalid
+        entry — a silently dropped source would surface to the agent as a
+        missing table with no explanation, so config errors are loud.
+        """
+        raw = os.getenv("CHDB_SOURCES")
+        if not raw or not raw.strip():
+            return []
+        from mcp_clickhouse.chdb_sources import parse_sources
+
+        return parse_sources(raw)
 
     def get_client_config(self) -> dict:
         """Get the configuration dictionary for chDB client.
