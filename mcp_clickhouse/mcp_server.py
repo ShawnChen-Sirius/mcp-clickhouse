@@ -819,16 +819,16 @@ def chdb_initial_prompt() -> str:
 
 
 def _apply_chdb_session_baseline(client) -> None:
-    """Apply the chDB-session security baseline once at init.
+    """Apply the work-bounding part of the chDB security baseline at init.
 
     - Snapshot system.table_functions so the allowlist scanner tracks the live
       engine (falls back to a hardcoded set if the catalog query fails).
     - Cap engine work: bound result bytes and abort runaway queries by wall time.
-    - Unless CHDB_ALLOW_WRITE_ACCESS=true, put the session under SET readonly=2,
-      which rejects persistent-table writes while keeping table functions usable.
 
-    The result byte cap and timeout are applied BEFORE readonly=2, in case a
-    future chDB release tightens which settings stay writable under readonly.
+    The readonly=2 lock is applied separately by _init_chdb_client, AFTER
+    CHDB_SOURCES materialization — creating the source views/databases is a
+    write, so it must run in this privileged window (and with the caps above
+    already active, so a slow source cannot hang startup unboundedly).
     """
     global _chdb_known_table_functions
     from chdb.agents.safety import FALLBACK_KNOWN_TABLE_FUNCTIONS
@@ -860,8 +860,29 @@ def _apply_chdb_session_baseline(client) -> None:
         setup_parts.append(f"max_execution_time = {query_timeout}")
     client.query("SET " + ", ".join(setup_parts), "TabSeparated")
 
-    if not chdb_config.allow_write_access:
-        client.query("SET readonly=2", "TabSeparated")
+
+def _materialize_chdb_sources(client) -> None:
+    """Materialize CHDB_SOURCES as named views/databases (privileged phase).
+
+    Runs after the work caps and before the readonly=2 lock. A malformed
+    CHDB_SOURCES raises (chDB comes up disabled with the config error);
+    individually failing sources are logged and skipped so one unreachable
+    source does not take down the rest.
+    """
+    specs = get_chdb_config().sources
+    if not specs:
+        return
+    from mcp_clickhouse.chdb_sources import materialize
+
+    failures = materialize(client, specs, file_allowlist=get_chdb_config().file_allowlist)
+    for name, error in failures:
+        logger.warning("chDB source %r skipped: %s", name, error)
+    logger.info(
+        "chDB sources materialized: %d of %d (%s)",
+        len(specs) - len(failures),
+        len(specs),
+        ", ".join(s.name for s in specs),
+    )
 
 
 def _init_chdb_client():
@@ -880,6 +901,9 @@ def _init_chdb_client():
 
         client = chs.Session(path=data_path)
         _apply_chdb_session_baseline(client)
+        _materialize_chdb_sources(client)
+        if not get_chdb_config().allow_write_access:
+            client.query("SET readonly=2", "TabSeparated")
         _chdb_error_message = None
         logger.info(f"Successfully connected to chDB with data_path={data_path}")
         return client

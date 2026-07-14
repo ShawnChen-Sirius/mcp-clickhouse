@@ -101,3 +101,33 @@ def test_no_gating_when_allowlist_unset(chdb_session, monkeypatch):
     monkeypatch.delenv("CHDB_FILE_ALLOWLIST", raising=False)
     # With no allowlist the scanner must not flag anything (0.4.0 behavior).
     assert mcp_server._chdb_sql_source_violation("SELECT * FROM url('http://x', 'CSV')") is None
+
+
+def test_sources_materialized_before_readonly_lock(monkeypatch):
+    # End-to-end through _init_chdb_client: CHDB_SOURCES views exist (a write,
+    # so they must have been created in the privileged phase) AND the session
+    # still ends up locked to readonly=2.
+    monkeypatch.setenv("CHDB_ENABLED", "true")
+    monkeypatch.setenv("CHDB_DATA_PATH", ":memory:")
+    monkeypatch.setenv(
+        "CHDB_SOURCES",
+        '[{"name": "ev", "type": "file", "path": "/nonexistent/e.csv", "structure": "id Int64"}]',
+    )
+    client = mcp_server._init_chdb_client()
+    assert client is not None, mcp_server._chdb_error_message
+    try:
+        tables = str(client.query("SELECT name FROM system.tables WHERE database='default'", "CSV"))
+        assert "ev" in tables
+        out = str(client.query("SELECT value FROM system.settings WHERE name = 'readonly'", "CSV"))
+        assert "2" in out
+    finally:
+        client.close()
+
+
+def test_malformed_sources_disable_chdb_loudly(monkeypatch):
+    monkeypatch.setenv("CHDB_ENABLED", "true")
+    monkeypatch.setenv("CHDB_DATA_PATH", ":memory:")
+    monkeypatch.setenv("CHDB_SOURCES", "this is not json")
+    client = mcp_server._init_chdb_client()
+    assert client is None
+    assert "CHDB_SOURCES" in (mcp_server._chdb_error_message or "")
