@@ -36,6 +36,49 @@ from fastmcp.tools import Tool
 
 logger = logging.getLogger(__name__)
 
+# DataFrames the embedding host has published for `dataframe_query`, by
+# reference name. Only meaningful in a co-located deployment (Lambda handler,
+# notebook, analysis sandbox) where the host process embeds this MCP server:
+# the frames live in this process, and chDB queries them zero-copy via its
+# Python() table function. There is deliberately no MCP tool to register a
+# frame — over a process boundary there is no frame to share.
+_DATAFRAMES: dict = {}
+
+# Servers waiting to expose `dataframe_query` once a frame exists. The first
+# published frame IS the co-located signal, so the tool needs no config flag:
+# a plain stdio/HTTP deployment never registers a frame and never advertises
+# the tool, while an embedding host gets it the moment it publishes one.
+_DATAFRAME_TOOL_ADDERS: list = []
+
+
+def _activate_dataframe_tools() -> None:
+    while _DATAFRAME_TOOL_ADDERS:
+        _DATAFRAME_TOOL_ADDERS.pop()()
+
+
+def register_dataframe(name: str, df) -> None:
+    """Publish a pandas DataFrame for the ``dataframe_query`` tool (host API).
+
+    ``name`` is the reference agents pass as ``df_ref``; it must be a plain
+    identifier. Re-registering a name replaces the frame. The first
+    registration also activates the ``dataframe_query`` tool on any server
+    that was set up before frames existed.
+    """
+    if not isinstance(name, str) or not name.isidentifier():
+        raise ValueError(f"dataframe name must be a plain identifier, got {name!r}")
+    _DATAFRAMES[name] = df
+    _activate_dataframe_tools()
+
+
+def unregister_dataframe(name: str) -> None:
+    """Remove a published DataFrame; unknown names are ignored."""
+    _DATAFRAMES.pop(name, None)
+
+
+def registered_dataframes() -> tuple:
+    """Names currently published for ``dataframe_query``."""
+    return tuple(sorted(_DATAFRAMES))
+
 
 def register_chdb_only_tools(
     mcp,
@@ -60,6 +103,10 @@ def register_chdb_only_tools(
     - ``allow_write``: must match the session's mode. When False (default) the
       session must already be under ``SET readonly=2`` (the server applies it
       at init) so writes/DDL are rejected by the engine.
+
+    ``dataframe_query`` is exposed automatically once the embedding host
+    publishes a frame via ``register_dataframe`` (before or after this call);
+    it is never advertised in deployments that publish none.
     """
     from chdb.agents import ChDBError, ChDBTool
 
@@ -142,6 +189,29 @@ def register_chdb_only_tools(
         like = f"%{pattern}%" if pattern else None
         return await _run(lambda: tool.list_functions(like=like), "list_functions")
 
+    async def dataframe_query(query: str, df_ref: str) -> str:
+        """Run SQL over a pandas DataFrame published by the host process.
+
+        Args:
+            query: SQL statement referencing the DataFrame as ``{df}``,
+                e.g. ``SELECT category, avg(price) FROM {df} GROUP BY category``.
+            df_ref: Reference name the frame was registered under.
+        """
+        if not df_ref.isidentifier():
+            raise ToolError(f"df_ref must be a plain identifier, got {df_ref!r}")
+        df = _DATAFRAMES.get(df_ref)
+        if df is None:
+            raise ToolError(
+                f"no DataFrame registered as {df_ref!r}; "
+                f"registered: {list(registered_dataframes()) or 'none'}"
+            )
+        if "{df}" not in query:
+            raise ToolError("query must reference the DataFrame as {df}")
+        sql = query.replace("{df}", f"Python({df_ref})")
+        return await _run(
+            lambda: tool.dataframe_query(sql, {df_ref: df}).rows, "dataframe_query"
+        )
+
     tools = (
         (list_databases, "list_databases", "List databases in the in-process chDB engine."),
         (list_tables, "list_tables", "List tables in a chDB database."),
@@ -151,4 +221,21 @@ def register_chdb_only_tools(
     )
     for fn, name, description in tools:
         mcp.add_tool(Tool.from_function(fn, name=name, description=description))
+
+    def _add_dataframe_tool():
+        mcp.add_tool(
+            Tool.from_function(
+                dataframe_query,
+                name="dataframe_query",
+                description=(
+                    "Run SQL over an in-process pandas DataFrame; reference it as {df} in the query."
+                ),
+            )
+        )
+        logger.info("chDB dataframe_query tool registered (host published a DataFrame)")
+
+    if _DATAFRAMES:
+        _add_dataframe_tool()
+    else:
+        _DATAFRAME_TOOL_ADDERS.append(_add_dataframe_tool)
     logger.info("chDB-only introspection tools registered (%d tools, over chdb.agents.ChDBTool)", len(tools))

@@ -13,6 +13,11 @@ from .mcp_server import (
     get_paginated_table_data,
     create_page_token,
 )
+from .chdb_tools import (
+    register_dataframe,
+    registered_dataframes,
+    unregister_dataframe,
+)
 
 
 if os.getenv("MCP_CLICKHOUSE_TRUSTSTORE_DISABLE", None) != "1":
@@ -34,4 +39,7 @@ __all__ = [
     "fetch_table_names_from_system",
     "get_paginated_table_data",
     "create_page_token",
+    "register_dataframe",
+    "registered_dataframes",
+    "unregister_dataframe",
 ]

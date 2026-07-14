@@ -101,6 +101,29 @@ locked to `readonly=2` afterwards. Credentials never leave the server: the engin
 requires the source to be reachable. A source that fails to materialize is logged and skipped;
 the rest still come up.
 
+#### dataframe_query: SQL over in-process pandas DataFrames (co-located only)
+
+When the host Python process embeds this server — a Lambda handler, notebook, or analysis
+sandbox where chDB and the DataFrames share one process — it can publish frames and let the
+agent query them zero-copy through chDB's `Python()` table function:
+
+```python
+import pandas as pd
+from mcp_clickhouse import register_dataframe
+
+register_dataframe("orders", pd.DataFrame({"category": ["a", "b"], "price": [10, 30]}))
+```
+
+```jsonc
+dataframe_query(query="SELECT category, avg(price) FROM {df} GROUP BY category", df_ref="orders")
+```
+
+No configuration is needed: publishing the first frame is itself the co-located signal, so the
+tool appears the moment `register_dataframe` is called (chDB-only mode). A plain stdio/HTTP
+deployment never registers a frame and never advertises the tool — across a process boundary
+there is no DataFrame to share, which is also why registration is a host-side Python API rather
+than an MCP tool.
+
 ### Health Check Endpoint
 
 When running with HTTP or SSE transport, a health check endpoint is available at `/health`. This endpoint:
